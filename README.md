@@ -144,32 +144,6 @@ Cluster-aware drivers expect `clustering_WEMAC_123feat_v03feb.csv` at the reposi
 
 For each `vol_test`, the helper takes the cluster ID from the last matching row and selects `method2_train` participants in that cluster. Ensure the final matching row represents the held-out user's assigned cluster, and exclude that user from the training records. Generate assignments using training subjects only and retain their provenance.
 
-## Required adjustments
-
-The following issues affect execution or learning and should be addressed before treating a run as an experiment:
-
-| Issue | Required action |
-| --- | --- |
-| Overwritten split helper | `Data_extraction.py` defines `get_train_test` twice. The cluster-list version replaces the one-argument version still called by `data_extraction`. Give the helpers distinct names and update their callers; otherwise the non-cluster path fails with a missing-argument error. |
-| Leaf indexing during batching | Integer indices stored as `train_mask` are not automatically offset per graph under standard PyG batching. Use a full-length Boolean leaf mask or implement explicit index-offset batching, keeping predictions aligned with leaf targets. See the [PyG batching guide](https://pytorch-geometric.readthedocs.io/en/2.6.0/advanced/batching.html). |
-| Multimodal alignment | Downstream scripts zip four independently shuffled loaders for BVP, GSR, SKT, and labels. Use one paired dataset/shared ordering so all three graphs and the emotion label refer to the same frame. |
-| Optimizer parameter selection | Drivers optimize `combined_model.fc.parameters()`, but `forward` uses `dense_layer_fc`, not `fc`. Include the active unfrozen classifier parameters in the optimizer; as written, the optimizer does not update the prediction path. |
-| Loss and output contract | Both combined models end the active classifier with sigmoid while training uses `CrossEntropyLoss`. Return raw class logits for that loss, or consistently redesign the output/loss pair. |
-| LSTM dimensions | Supply an explicit batch/sequence/feature layout and select the desired sequence output. Do not use randomly ordered batch samples as temporal steps. |
-| Fixed batch size | Combined models reshape using a constructor-supplied batch size. Drivers use `drop_last=True`, including for testing, to match it. Derive batch size dynamically and retain all evaluation samples; small datasets can otherwise produce no batches. |
-| Legacy standalone entry points | `Train_SKT_GCN.py` passes path strings to a function expecting arrays. Use the integrated drivers or load normalized arrays explicitly before calling `train_SKT`. |
-| Frozen encoder mode | Parameter freezing does not disable dropout. When using Transformer ablations, keep frozen encoders in evaluation mode during classifier training if deterministic frozen features are intended. |
-
-For example, after freezing the encoders, the active downstream parameters can be selected with:
-
-```python
-optimizer = torch.optim.Adam(
-    (p for p in combined_model.parameters() if p.requires_grad),
-    lr=1e-3,
-)
-```
-
-This addresses optimizer selection only; the batching, alignment, output, and shape issues above still need to be resolved.
 
 ## Experiment workflows
 
@@ -206,32 +180,6 @@ GCN_models/GCN_model_Vol_<ID>/gcn_skt.pth
 Both cloud variants use the same output names. Keep separate output directories for clustered/non-clustered runs and encoder ablations to avoid overwriting or mixing experiments.
 
 The edge drivers load those local files and use the **first 20% of the target user's frame columns** for supervised adaptation, with the remaining 80% for evaluation. This is a fraction-based split in cache order, not a balanced fixed-shot sampler. `Train_Edge_cluster.py` does not itself read the cluster CSV; its cluster-specific behavior depends on loading the encoders produced by the matching cloud run.
-
-### Default training settings
-
-| Setting | Pretext training | Downstream classification |
-| --- | --- | --- |
-| Optimizer | Adam | Adam, after correcting parameter selection. |
-| Learning rate | `0.01` | `0.001` |
-| Epochs | 10 in integrated/cloud drivers; signal functions default to 100. | 100 |
-| Batch size | 256 | 256 in integrated drivers; 16 in edge drivers. |
-| Target | Leaf parent-group class. | Binary emotion class. |
-
-## Outputs and reproducibility
-
-The scripts print classification accuracy, weighted F1, losses, and timing. Cloud scripts save full serialized encoder objects. The non-cluster integrated driver saves `model.pth`; the cluster driver saves `gcn_model.pth`, overwriting that filename across folds. Use fold-specific names when retaining results.
-
-A `Train_GCN/model.pth` file is already tracked, but its training configuration and provenance are not documented. It should not be assumed to represent the thesis's final model. Full-object checkpoints also depend on matching Python class definitions and serialization settings; for portable experiments, save architecture/configuration metadata together with state dictionaries.
-
-Before reporting results:
-
-- Fit preprocessing and clustering within the training subjects of each fold. Current normalization is applied separately to partitions, and non-cluster cloud scripts normalize before reconstructing LOSO folds. Record whether any held-out-user calibration is intentionally transductive.
-- Keep self-supervised training free of held-out subjects, and keep adaptation labels separate from final evaluation labels. Overlapping signal windows may require separation at the recording/trial level rather than by adjacent cache columns.
-- Fix seeds and preserve subject/frame order. Use validation data for epoch selection: edge scripts currently report the best accuracy and best F1 observed over test epochs, potentially from different epochs.
-- Retain every evaluation sample and report aggregate results across users. Verify that all modality/label IDs match before model training.
-- Treat printed latency as unvalidated timing: the code measures batch forward calls without explicit CUDA synchronization, despite labeling them as one-window timings. FLOP estimates also require checking profiler support for graph operations.
-
-The repository provides the algorithmic experiment components, not a complete Jetson deployment package or a verified reproduction of Chapter 5's final scores.
 
 ## Citation
 
